@@ -1,0 +1,27 @@
+{
+  "prefix": "/",
+  "guildId": "881891988226600980",
+  "clientId": "1501942989470306414",
+  "channels": {
+    "welcome": "1501955321046896650",
+    "leave": "1501955499120132218",
+    "register": "1501955888263725146",
+    "register_landing": "1501952850656362667",
+    "logs": "1501955979204366336",
+    "live_logs": "1502314458351927540"
+  },
+  "roles": {
+    "registered": "912476180555391006",
+    "live": "1502312751257751572"
+  },
+  "liveSystem": {
+    "enabled": true,
+    "checkInterval": 120000,
+    "platforms": ["Twitch", "YouTube"]
+  },
+  "colors": {
+    "main": "#5865F2",
+    "success": "#57F287",
+    "error": "#ED4245"
+  }
+}
