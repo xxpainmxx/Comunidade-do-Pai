@@ -11,15 +11,65 @@ const __dirname = dirname(__filename);
 
 // Rastreador contínuo e leve do pico de RSS observado
 let peakRssBytes = process.memoryUsage().rss;
+let lastSampledRssBytes = process.memoryUsage().rss;
 
-// Amostragem periódica leve (a cada 10s) para registrar picos reais de RAM mesmo sem requisições HTTP
-// O método unref() garante que este timer leve não impede o shutdown do processo
-setInterval(() => {
+/**
+ * Realiza a leitura e atualização atômica do pico de RSS.
+ * Pode ser chamado periodicamente ou sob demanda em testes e rotas.
+ */
+export function sampleMemoryNow() {
     const currentRss = process.memoryUsage().rss;
+    lastSampledRssBytes = currentRss;
     if (currentRss > peakRssBytes) {
         peakRssBytes = currentRss;
     }
-}, 10000).unref();
+    return {
+        currentRss,
+        peakRssBytes,
+        lastSampledRssBytes
+    };
+}
+
+/**
+ * Retorna as métricas formatadas em MB para diagnósticos e testes.
+ */
+export function getMemoryStats() {
+    sampleMemoryNow();
+    const memory = process.memoryUsage();
+    const rssMB = Math.round(memory.rss / 1024 / 1024);
+    const heapUsedMB = Math.round(memory.heapUsed / 1024 / 1024);
+    const heapTotalMB = Math.round(memory.heapTotal / 1024 / 1024);
+    const externalMB = Math.round(memory.external / 1024 / 1024);
+    const arrayBuffersMB = Math.round(memory.arrayBuffers / 1024 / 1024);
+    const peakRssMB = Math.round(peakRssBytes / 1024 / 1024);
+    const lastSampledRssMB = Math.round(lastSampledRssBytes / 1024 / 1024);
+
+    return {
+        rssMB: `${rssMB} MB`,
+        heapUsedMB: `${heapUsedMB} MB`,
+        heapTotalMB: `${heapTotalMB} MB`,
+        externalMB: `${externalMB} MB`,
+        arrayBuffersMB: `${arrayBuffersMB} MB`,
+        peakRssMB: `${peakRssMB} MB`,
+        lastSampledRssMB: `${lastSampledRssMB} MB`,
+        targetOperational: '350 MB',
+        maxLimit: '500 MB',
+        health: rssMB < 350 ? 'EXCELENTE' : (rssMB < 450 ? 'BOM' : 'ALTO')
+    };
+}
+
+// Amostragem periódica leve (a cada 10s) para registrar picos reais de RAM mesmo sem requisições HTTP
+// O método unref() garante que este timer leve não impede o shutdown do processo
+export const memoryMonitorInterval: NodeJS.Timeout = setInterval(() => {
+    sampleMemoryNow();
+}, 10000);
+memoryMonitorInterval.unref();
+
+export function stopMemoryMonitor() {
+    if (memoryMonitorInterval) {
+        clearInterval(memoryMonitorInterval);
+    }
+}
 
 // --- SERVIDOR WEB (KEEP ALIVE & STATUS) ---
 const app = express();
@@ -33,31 +83,9 @@ app.get('/', (req, res) => {
 
 // Endpoint de diagnóstico ampliado para monitoramento detalhado de memória (RAM/RSS/Heap/Canvas)
 app.get('/status', (req, res) => {
-    const memory = process.memoryUsage();
-    if (memory.rss > peakRssBytes) {
-        peakRssBytes = memory.rss;
-    }
-
-    const rssMB = Math.round(memory.rss / 1024 / 1024);
-    const heapUsedMB = Math.round(memory.heapUsed / 1024 / 1024);
-    const heapTotalMB = Math.round(memory.heapTotal / 1024 / 1024);
-    const externalMB = Math.round(memory.external / 1024 / 1024);
-    const arrayBuffersMB = Math.round(memory.arrayBuffers / 1024 / 1024);
-    const peakRssMB = Math.round(peakRssBytes / 1024 / 1024);
-
     res.json({
         status: 'online',
-        ram: {
-            rssMB: `${rssMB} MB`,
-            heapUsedMB: `${heapUsedMB} MB`,
-            heapTotalMB: `${heapTotalMB} MB`,
-            externalMB: `${externalMB} MB`,
-            arrayBuffersMB: `${arrayBuffersMB} MB`,
-            peakRssMB: `${peakRssMB} MB`,
-            targetOperational: '350 MB',
-            maxLimit: '500 MB',
-            health: rssMB < 350 ? 'EXCELENTE' : (rssMB < 450 ? 'BOM' : 'ALTO')
-        },
+        ram: getMemoryStats(),
         canvasQueue: CanvasHelper.getQueueStats(),
         uptimeSeconds: Math.round(process.uptime()),
         guilds: client.guilds?.cache.size ?? 0,
@@ -65,9 +93,20 @@ app.get('/status', (req, res) => {
     });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[STATUS] Servidor Keep-Alive rodando na porta ${PORT}`);
-});
+let serverInstance: any = null;
+const startServer = () => {
+    if (!serverInstance) {
+        serverInstance = app.listen(PORT, '0.0.0.0', () => {
+            console.log(`[STATUS] Servidor Keep-Alive rodando na porta ${PORT}`);
+        }).on('error', (err: any) => {
+            if (err.code === 'EADDRINUSE') {
+                console.log(`[STATUS] Porta ${PORT} já em uso (ambiente de desenvolvimento/teste).`);
+            } else {
+                console.error('[ERRO] Servidor HTTP:', err);
+            }
+        });
+    }
+};
 
 // --- CLIENTE DISCORD OTIMIZADO PARA BAIXA MEMÓRIA (MÁX 300MB) ---
 export const client = new Client({
@@ -176,4 +215,8 @@ const start = async () => {
     }
 };
 
-start();
+const isMainScript = !process.argv[1] || process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.js') || process.argv[1].endsWith('index.js');
+if (isMainScript) {
+    startServer();
+    start();
+}
