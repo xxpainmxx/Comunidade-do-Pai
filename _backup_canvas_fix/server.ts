@@ -9,17 +9,8 @@ import { CanvasHelper } from './src/utils/canvasHelper.ts';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Rastreador contínuo e leve do pico de RSS observado
-let peakRssBytes = process.memoryUsage().rss;
-
-// Amostragem periódica leve (a cada 10s) para registrar picos reais de RAM mesmo sem requisições HTTP
-// O método unref() garante que este timer leve não impede o shutdown do processo
-setInterval(() => {
-    const currentRss = process.memoryUsage().rss;
-    if (currentRss > peakRssBytes) {
-        peakRssBytes = currentRss;
-    }
-}, 10000).unref();
+// Rastreador leve do pico de RSS observado
+let peakRssBytes = 0;
 
 // --- SERVIDOR WEB (KEEP ALIVE & STATUS) ---
 const app = express();

@@ -6,23 +6,20 @@ interface RenderTask<T> {
     execute: () => Promise<T>;
     resolve: (val: T) => void;
     reject: (err: any) => void;
-    queueTimeoutId?: NodeJS.Timeout;
+    timeoutId: NodeJS.Timeout;
 }
 
 /**
  * Utilitário para gerar cards visuais modernos usando Canvas.
- * Inclui fila nativa de renderização serializada (concorrência máxima = 1 estrita)
+ * Inclui fila nativa de renderização serializada (concorrência máxima = 1)
  * para proteger a memória RAM física (RSS/Cairo C++) contra picos e vazamentos.
- * Garante que em caso de timeout de 15s, o worker NÃO é liberado até que a
- * operação original encerre, impedindo sobreposição de alocações nativas.
  */
 export class CanvasHelper {
     private static renderQueue: RenderTask<any>[] = [];
     private static activeWorkers = 0;
     private static readonly maxConcurrency = 1;
     private static readonly maxQueueSize = 25;
-    private static readonly renderTimeoutMs = 15000; // Limite de 15s para detectar operações de execução demoradas
-    private static readonly queueWaitTimeoutMs = 60000; // Limite de espera na fila antes de iniciar
+    private static readonly renderTimeoutMs = 15000;
     private static taskIdCounter = 0;
     private static processedCount = 0;
     private static failedCount = 0;
@@ -30,32 +27,31 @@ export class CanvasHelper {
     /**
      * Enfileira uma operação de renderização do Canvas para execução controlada.
      */
-    public static enqueue<T>(renderFn: () => Promise<T>): Promise<T> {
+    private static enqueue<T>(renderFn: () => Promise<T>): Promise<T> {
         return new Promise<T>((resolve, reject) => {
             if (this.renderQueue.length >= this.maxQueueSize) {
                 console.warn(`[CanvasHelper] Fila cheia (${this.renderQueue.length}/${this.maxQueueSize}). Rejeitando renderização para proteger RAM.`);
-                return reject(new Error(`Fila de renderização gráfica cheia (limite de ${this.maxQueueSize} excedido). Tente novamente em instantes.`));
+                return reject(new Error('Fila de renderização gráfica cheia. Tente novamente em instantes.'));
             }
 
             const taskId = ++this.taskIdCounter;
 
-            // Timeout de espera máxima na fila (60s)
-            const queueTimeoutId = setTimeout(() => {
+            const timeoutId = setTimeout(() => {
                 const idx = this.renderQueue.findIndex(item => item.id === taskId);
                 if (idx !== -1) {
                     this.renderQueue.splice(idx, 1);
                     this.failedCount++;
-                    console.error(`[CanvasHelper] Renderização #${taskId} expirou aguardando vaga na fila (${this.queueWaitTimeoutMs}ms).`);
-                    reject(new Error(`Tempo limite na fila de espera do Canvas excedido (${this.queueWaitTimeoutMs}ms).`));
+                    console.error(`[CanvasHelper] Renderização #${taskId} expirou na fila de espera.`);
+                    reject(new Error(`Tempo limite na fila do Canvas excedido (${this.renderTimeoutMs}ms).`));
                 }
-            }, this.queueWaitTimeoutMs);
+            }, this.renderTimeoutMs);
 
             this.renderQueue.push({
                 id: taskId,
                 execute: renderFn,
                 resolve,
                 reject,
-                queueTimeoutId
+                timeoutId
             });
 
             this.processQueue();
@@ -63,10 +59,7 @@ export class CanvasHelper {
     }
 
     /**
-     * Processa tarefas da fila respeitando o limite estrito de concorrência (máx 1).
-     * Se uma operação atingir o timeout de 15s, o chamador é notificado imediatamente,
-     * porém o worker permanece ocupado aguardando o encerramento da Promise original
-     * antes de liberar a vaga para a próxima tarefa.
+     * Processa tarefas da fila respeitando o limite estrito de concorrência.
      */
     private static async processQueue(): Promise<void> {
         if (this.activeWorkers >= this.maxConcurrency || this.renderQueue.length === 0) {
@@ -76,67 +69,25 @@ export class CanvasHelper {
         const task = this.renderQueue.shift();
         if (!task) return;
 
-        // Limpa o timer de espera na fila antes de iniciar a execução
-        if (task.queueTimeoutId) {
-            clearTimeout(task.queueTimeoutId);
-            task.queueTimeoutId = undefined;
-        }
-
         this.activeWorkers++;
 
-        let isTimedOut = false;
-        let execTimeoutId: NodeJS.Timeout | null = null;
-        let executionPromise: Promise<any> | null = null;
-
-        // Timeout de execução de 15 segundos
-        const timeoutPromise = new Promise<never>((_, rej) => {
-            execTimeoutId = setTimeout(() => {
-                isTimedOut = true;
-                this.failedCount++;
-                console.error(`[CanvasHelper] Renderização #${task.id} ultrapassou o limite de ${this.renderTimeoutMs}ms. Bloqueando liberação do worker até que a operação original encerre.`);
-                rej(new Error(`[CanvasHelper] Tempo limite de execução de ${this.renderTimeoutMs}ms excedido na renderização #${task.id}.`));
-            }, this.renderTimeoutMs);
-        });
-
         try {
-            // Dispara a execução original
-            executionPromise = task.execute();
-
-            // Espera a execução original ou o timeout de 15s
+            // Executa com limite máximo individual
             const result = await Promise.race([
-                executionPromise,
-                timeoutPromise
+                task.execute(),
+                new Promise<never>((_, rej) =>
+                    setTimeout(() => rej(new Error(`Renderização #${task.id} excedeu o tempo limite de execução.`)), this.renderTimeoutMs)
+                )
             ]);
-
-            // Finalizado com sucesso dentro do prazo
-            if (execTimeoutId) clearTimeout(execTimeoutId);
+            clearTimeout(task.timeoutId);
             this.processedCount++;
             task.resolve(result);
         } catch (error) {
-            if (execTimeoutId) clearTimeout(execTimeoutId);
-
-            if (!isTimedOut) {
-                this.failedCount++;
-            }
-
-            // Notifica o chamador da rejeição/timeout
+            clearTimeout(task.timeoutId);
+            this.failedCount++;
+            console.error(`[CanvasHelper] Falha na renderização #${task.id}:`, error);
             task.reject(error);
-
-            // PROTEÇÃO CRÍTICA DE CONCORRÊNCIA:
-            // Caso tenha ocorrido timeout, o worker NÃO é liberado imediatamente.
-            // Aguardamos a finalização da Promise nativa em segundo plano
-            // para garantir que a concorrência de 1 nunca seja violada.
-            if (isTimedOut && executionPromise) {
-                console.warn(`[CanvasHelper] Worker retido. Aguardando finalização da renderização #${task.id} em segundo plano...`);
-                try {
-                    await executionPromise.catch(() => null);
-                } catch {
-                    // Erro tratado com segurança
-                }
-                console.log(`[CanvasHelper] Operação #${task.id} concluída/encerrada em segundo plano. Liberando worker.`);
-            }
         } finally {
-            if (execTimeoutId) clearTimeout(execTimeoutId);
             this.activeWorkers--;
             setImmediate(() => this.processQueue());
         }
@@ -149,8 +100,6 @@ export class CanvasHelper {
         return {
             queueLength: this.renderQueue.length,
             activeWorkers: this.activeWorkers,
-            maxConcurrency: this.maxConcurrency,
-            maxQueueSize: this.maxQueueSize,
             processedCount: this.processedCount,
             failedCount: this.failedCount
         };

@@ -45,8 +45,7 @@ export class LiveManager {
         if (authorizedStreamers.length === 0) return; // Se a lista estiver vazia, não monitora ninguém (ou opcionalmente monitora todos)
 
         for (const streamerId of authorizedStreamers) {
-            // Consulta primeiro o cache da guilda para evitar requisições REST redundantes e alocações repetidas de objetos
-            const member = guild.members.cache.get(streamerId) || await guild.members.fetch(streamerId).catch(() => null);
+            const member = await guild.members.fetch(streamerId).catch(() => null);
             if (member) {
                 await this.updateMemberLiveStatus(member, liveRole);
             }

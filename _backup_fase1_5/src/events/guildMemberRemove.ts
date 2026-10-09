@@ -21,10 +21,6 @@ export default {
             });
         } catch (error) {
             console.error('[ERRO] Ao gerar card de saída:', error);
-            // Fallback seguro em texto caso a renderização gráfica falhe ou expire na fila
-            await channel.send({
-                content: `😢 **${member.user.tag}** nos deixou.`
-            }).catch(() => null);
         }
     },
 };
